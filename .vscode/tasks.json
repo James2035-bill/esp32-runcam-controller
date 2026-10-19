@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ESP32: Build",
+      "type": "shell",
+      "command": "make build",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": "$gcc",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "ESP32: Upload",
+      "type": "shell",
+      "command": "make upload",
+      "problemMatcher": "$gcc",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "ESP32: Serial Monitor",
+      "type": "shell",
+      "command": "make monitor",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "ESP32: Upload + Monitor",
+      "type": "shell",
+      "command": "make flash",
+      "problemMatcher": "$gcc",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "ESP32: List Ports",
+      "type": "shell",
+      "command": "make ports",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    }
+  ]
+}
