@@ -7,6 +7,7 @@
 #   make flash     upload, then immediately monitor
 #   make clean     remove build artifacts
 #   make intellisense  rebuild VSCode include paths
+#   make remote    serve the Bluetooth phone remote on http://localhost:8000
 #
 # Override the port if auto-detect picks wrong:  make upload PORT=/dev/cu.usbserial-10
 
@@ -22,7 +23,7 @@ BUILDDIR := build
 PORT ?= $(firstword $(wildcard /dev/cu.usbserial-* /dev/cu.wchusbserial* \
              /dev/cu.usbmodem* /dev/cu.SLAB_USBtoUART*))
 
-.PHONY: ports build upload monitor flash clean check-port intellisense
+.PHONY: ports build upload monitor flash clean check-port intellisense remote
 
 ports:
 	@echo "Candidate ESP32 ports:"
@@ -64,6 +65,12 @@ flash: upload monitor
 # Re-run after upgrading the ESP32 core or installing a new library.
 intellisense: build
 	python3 tools/gen_intellisense.py
+
+# Web Bluetooth needs https or localhost, so serve the page locally for
+# testing from Chrome on this Mac. Ctrl-C to stop.
+remote:
+	@echo "Open http://localhost:8000 in Chrome. Ctrl-C to stop."
+	cd remote && python3 -m http.server 8000
 
 clean:
 	rm -rf $(BUILDDIR)

@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0f12">
+<title>RunCam Remote</title>
+<!--
+  Bluetooth phone remote for the ESP32 RunCam controller.
+
+  Talks Web Bluetooth to the ESP32's Nordic UART service and sends the same
+  text commands as the serial console (STANDBY, REC, STOP, SYNC ...). It polls
+  "APP", which the firmware answers with one "@S {json}" status line.
+
+  Web Bluetooth needs Chrome (Android, Mac, Windows) or the Bluefy browser on
+  iPhone, and the page must be served over https:// or from localhost.
+-->
+<style>
+  :root {
+    --bg:#f4f5f7; --panel:#ffffff; --panel-2:#eceef2; --line:#d9dce2;
+    --text:#14171c; --muted:#5f6773;
+    --red:#e5322b; --green:#1f9d4c; --amber:#b86e00; --blue:#1769e0;
+    --stop-bg:#14171c; --stop-fg:#ffffff;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0d0f12; --panel:#171a1f; --panel-2:#22262d; --line:#2e333b;
+      --text:#eef1f5; --muted:#949cab;
+      --red:#ff453a; --green:#32d74b; --amber:#ffb340; --blue:#4c9aff;
+      --stop-bg:#ffffff; --stop-fg:#000000;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; background:var(--bg); color:var(--text); }
+  body {
+    font:17px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    padding:max(16px, env(safe-area-inset-top)) 16px max(28px, env(safe-area-inset-bottom));
+    max-width:480px; margin:0 auto;
+  }
+  header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px; }
+  h1 { font-size:22px; margin:0; letter-spacing:-0.01em; }
+  .pill { display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:999px;
+          background:var(--panel); font-size:14px; color:var(--muted); white-space:nowrap; }
+  .pill i { width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .pill.on i { background:var(--green); }
+  .pill.lost i { background:var(--amber); }
+
+  .card { background:var(--panel); border-radius:20px; padding:20px; margin-bottom:14px; }
+  .hidden { display:none !important; }
+
+  /* --- status --- */
+  .status { text-align:center; padding:26px 20px 22px; }
+  .state { font-size:15px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .status.rec .state { color:var(--red); }
+  .status.ready .state { color:var(--green); }
+  .status.busy .state { color:var(--amber); }
+  .timer { font:600 56px/1.1 ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric:tabular-nums; margin:8px 0 2px; }
+  .status.rec .timer { color:var(--red); }
+  .hint { color:var(--muted); font-size:16px; min-height:23px; }
+
+  /* --- camera light guide --- */
+  .light { display:flex; align-items:center; justify-content:center; gap:10px; margin-top:16px;
+           padding-top:16px; border-top:1px solid var(--line); font-size:15px; color:var(--muted); }
+  .led { width:14px; height:14px; border-radius:50%; background:var(--blue); box-shadow:0 0 8px var(--blue); }
+  .led.blink { animation:blink 2s steps(1) infinite; }
+  .led.none { background:var(--line); box-shadow:none; }
+  .light b { color:var(--text); font-weight:600; }
+  @keyframes blink { 50% { opacity:.12; box-shadow:none; } }
+
+  /* --- buttons --- */
+  button { font:inherit; font-weight:650; border:0; cursor:pointer; color:var(--text);
+           background:var(--panel-2); border-radius:16px; padding:14px 16px; min-height:52px;
+           transition:transform .06s, opacity .2s; touch-action:manipulation; }
+  button:active:not(:disabled) { transform:scale(.97); }
+  button:disabled { opacity:.38; cursor:default; }
+  .primary { display:block; width:100%; min-height:92px; font-size:23px; border-radius:22px; margin-bottom:12px; }
+  .go     { background:var(--green); color:#fff; }
+  .record { background:var(--red); color:#fff; }
+  .stop   { background:var(--stop-bg); color:var(--stop-fg); }
+  .wait   { background:var(--panel-2); color:var(--muted); }
+  .connect { background:var(--blue); color:#fff; }
+
+  .msg { min-height:22px; text-align:center; font-size:15px; color:var(--muted); margin:0 4px 14px; }
+  .msg.warn { color:var(--amber); }
+  .banner { border-radius:16px; padding:14px 16px; margin-bottom:14px; font-size:16px; background:var(--panel-2); }
+  .banner.ok { background:color-mix(in srgb, var(--green) 16%, var(--panel)); }
+  .banner.warn { background:color-mix(in srgb, var(--amber) 18%, var(--panel)); }
+
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .facts { display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:15px; }
+  .facts .k { color:var(--muted); font-size:13px; }
+  .facts .v { font-weight:650; }
+
+  details { background:var(--panel); border-radius:20px; margin-bottom:14px; }
+  summary { padding:16px 20px; font-weight:650; cursor:pointer; list-style:none; }
+  summary::-webkit-details-marker { display:none; }
+  summary::after { content:"\203A"; float:right; color:var(--muted); transition:transform .2s; }
+  details[open] summary::after { transform:rotate(90deg); }
+  .inner { padding:0 20px 20px; }
+  .inner p { margin:0 0 12px; color:var(--muted); font-size:15px; }
+
+  .switch { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+  .switch span { font-size:15px; }
+  .switch small { display:block; color:var(--muted); font-size:13px; }
+  .switch input { width:52px; height:30px; flex:none; accent-color:var(--green); }
+
+  .log { font:12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; background:var(--bg); border-radius:12px;
+         padding:10px; height:190px; overflow-y:auto; white-space:pre-wrap; word-break:break-word; margin:12px 0; }
+  .log .me { color:var(--blue); }
+  .send { display:flex; gap:8px; }
+  .send input { flex:1; min-width:0; font:inherit; font-size:16px; color:var(--text); background:var(--bg);
+                border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
+  .send button { min-height:0; padding:10px 16px; border-radius:12px; }
+  .small { font-size:15px; min-height:44px; padding:10px 14px; border-radius:12px; }
+  @media (prefers-reduced-motion: reduce) { .led.blink { animation-duration:4s; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>RunCam Remote</h1>
+  <span id="pill" class="pill"><i></i><span id="pillText">Not connected</span></span>
+</header>
+
+<!-- Browser cannot do Bluetooth -->
+<section id="noBle" class="card hidden">
+  <strong>This browser can't use Bluetooth.</strong>
+  <p class="hint" style="text-align:left;margin-top:8px">
+    On iPhone, open this page in the free <b>Bluefy</b> browser app.
+    On Android, Mac or Windows, use <b>Chrome</b>.
+  </p>
+</section>
+
+<!-- Not connected -->
+<section id="connectView">
+  <div class="card status">
+    <div class="state">Camera remote</div>
+    <p class="hint" style="margin-top:10px">Power on the rocket electronics, then tap Connect and pick <b>RunCam-Ctl</b>.</p>
+  </div>
+  <button id="connectBtn" class="primary connect">Connect</button>
+  <div id="connectMsg" class="msg"></div>
+</section>
+
+<!-- Connected -->
+<section id="mainView" class="hidden">
+  <div id="status" class="card status" aria-live="polite">
+    <div id="stateText" class="state">–</div>
+    <div id="timer" class="timer">00:00</div>
+    <div id="hintText" class="hint">&nbsp;</div>
+    <div class="light">
+      <span id="led" class="led none"></span>
+      <span id="lightText">Camera light</span>
+    </div>
+  </div>
+
+  <div id="savedBanner" class="banner ok hidden">Video saved. It's safe to power off once the camera light is solid.</div>
+  <div id="uartBanner" class="banner warn hidden">The camera isn't answering. Check its TX/RX wires and power, then tap <b>Wake camera</b> again.</div>
+
+  <button id="actionBtn" class="primary go" disabled>Wake camera</button>
+  <div id="msg" class="msg"></div>
+
+  <details id="mismatch">
+    <summary>Camera light doesn't match?</summary>
+    <div class="inner">
+      <p>Tell the remote what the camera's blue light is doing. Nothing is sent to the camera; this just puts the buttons back in step.</p>
+      <div class="row">
+        <button id="syncRec" class="small">Blinking slowly<br><small>(recording)</small></button>
+        <button id="syncIdle" class="small">Solid<br><small>(not recording)</small></button>
+      </div>
+    </div>
+  </details>
+
+  <div class="card facts">
+    <div><div class="k">Full battery lasts</div><div class="v" id="fullMin">–</div></div>
+    <div><div class="k">Camera link</div><div class="v" id="link">–</div></div>
+  </div>
+
+  <details>
+    <summary>Advanced</summary>
+    <div class="inner">
+      <label class="switch">
+        <span>Camera records at power-up<small>Stops it automatically after Wake camera (AUTOREC)</small></span>
+        <input id="arecSwitch" type="checkbox">
+      </label>
+      <div class="row">
+        <button class="small" data-cmd="INFO">Camera info</button>
+        <button class="small" data-cmd="STATUS">Full status</button>
+      </div>
+      <div id="log" class="log"></div>
+      <div class="send">
+        <input id="cmdIn" placeholder="Command, e.g. HELP" autocapitalize="characters" autocomplete="off" autocorrect="off">
+        <button id="sendBtn">Send</button>
+      </div>
+      <button id="disconnectBtn" class="small" style="width:100%;margin-top:14px">Disconnect</button>
+    </div>
+  </details>
+</section>
+
+<script>
+"use strict";
+const NUS    = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";   // phone -> ESP32
+const NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";   // ESP32 -> phone
+const POLL_MS = 1500;
+
+const $ = (id) => document.getElementById(id);
+let device = null, rx = null;
+let connected = false, userDisconnect = false;
+let st = null, prevState = null;
+let recStartLocal = 0;
+let busy = false;            // a button command is in flight
+let pollOutstanding = 0;     // time the last APP poll was sent, 0 = none
+let showSaved = false;
+let rxBuf = "";
+
+// ------------------------------------------------------------ Bluetooth ---
+// GATT allows one operation at a time, so every write goes through a queue.
+let writeChain = Promise.resolve();
+function write(text) {
+  const data = new TextEncoder().encode(text + "\n");
+  writeChain = writeChain.then(() => {
+    if (!rx) throw new Error("not connected");
+    return rx.writeValueWithResponse ? rx.writeValueWithResponse(data) : rx.writeValue(data);
+  });
+  return writeChain.catch((e) => { log("send failed: " + e.message); throw e; });
+}
+
+async function connect() {
+  $("connectMsg").textContent = "";
+  try {
+    if (!device) {
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [NUS] }, { name: "RunCam-Ctl" }],
+        optionalServices: [NUS],
+      });
+      device.addEventListener("gattserverdisconnected", onDisconnected);
+    }
+    setPill("Connecting…", "lost");
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(NUS);
+    rx = await svc.getCharacteristic(NUS_RX);
+    const tx = await svc.getCharacteristic(NUS_TX);
+    await tx.startNotifications();
+    tx.addEventListener("characteristicvaluechanged", (e) =>
+      onData(new TextDecoder().decode(e.target.value)));
+    connected = true;
+    userDisconnect = false;
+    writeChain = Promise.resolve();
+    showView();
+    setPill("Connected", "on");
+    poll();
+    keepAwake();
+  } catch (e) {
+    connected = false;
+    setPill("Not connected", "");
+    // Closing the device picker is not an error worth shouting about.
+    if (e.name !== "NotFoundError") $("connectMsg").textContent = "Couldn't connect: " + e.message;
+    showView();
+  }
+}
+
+function onDisconnected() {
+  connected = false;
+  rx = null;
+  pollOutstanding = 0;
+  setPill(userDisconnect ? "Not connected" : "Connection lost", userDisconnect ? "" : "lost");
+  showView();
+  if (!userDisconnect) {
+    $("connectMsg").textContent = "Connection lost. The camera keeps doing whatever it was doing. Tap Reconnect.";
+    $("connectBtn").textContent = "Reconnect";
+    setTimeout(() => { if (!connected && device) connect(); }, 1500);   // one quiet retry
+  }
+}
+
+function disconnect() {
+  userDisconnect = true;
+  if (device && device.gatt.connected) device.gatt.disconnect();
+}
+
+// Replies arrive in 20-byte pieces; rebuild lines before acting on them.
+function onData(chunk) {
+  rxBuf += chunk;
+  let nl;
+  while ((nl = rxBuf.indexOf("\n")) >= 0) {
+    const line = rxBuf.slice(0, nl).replace(/\r$/, "");
+    rxBuf = rxBuf.slice(nl + 1);
+    if (line.startsWith("@S ")) {
+      pollOutstanding = 0;
+      try { applyStatus(JSON.parse(line.slice(3))); } catch (e) { /* torn line: next poll fixes it */ }
+    } else if (line.includes('"st":') || line.includes('"settle":')) {
+      // A status line that lost its start (a dropped BLE chunk): not a message.
+    } else if (line.trim()) {
+      log(line);
+      const [text, warn] = friendly(line);
+      setMsg(text, warn);
+      // The ESP32 speaks when its state changes: refresh now, not next poll.
+      pollOutstanding = 0;
+      poll();
+    }
+  }
+}
+
+function poll() {
+  if (!connected) return;
+  // Don't stack polls while one is unanswered (a camera press can hold the
+  // ESP32 for ~2 s), but don't wait long either: a dropped reply must not
+  // freeze the screen.
+  if (pollOutstanding && Date.now() - pollOutstanding < 2500) return;
+  pollOutstanding = Date.now();
+  write("APP").catch(() => {});
+}
+setInterval(poll, POLL_MS);
+
+async function command(cmd) {
+  if (!connected || busy) return;
+  busy = true; render();
+  log(cmd, true);
+  try { await write(cmd); } catch (e) { setMsg("Couldn't send — check the connection", true); }
+  busy = false;
+  pollOutstanding = 0;
+  poll();
+  render();
+}
+
+// --------------------------------------------------------------- status ---
+function applyStatus(s) {
+  if (s.rec && (!st || !st.rec || Math.abs((Date.now() - s.t * 1000) - recStartLocal) > 2000))
+    recStartLocal = Date.now() - s.t * 1000;
+  // A save finishing is the moment people need to hear about.
+  if (prevState && ["SAVING", "STOPPING"].includes(prevState) && s.st !== prevState) showSaved = true;
+  if (s.st === "RECORDING" || s.st === "BOOTING") showSaved = false;
+  prevState = s.st;
+  st = s;
+  render();
+}
+
+// What the page says, and what the camera light should look like, per state.
+function view(s) {
+  if (!s) return { label: "Connecting…", cls: "busy", hint: "", led: "none", light: "Camera light", btn: ["Please wait", "wait", false] };
+  if (s.st === "OFF") return {
+    label: "Camera asleep", cls: "", led: s.arec ? "blink" : "solid",
+    hint: "Tap Wake camera to get ready.",
+    light: s.arec ? "Light: <b>slow blink</b> until you wake it (camera records at power-up)" : "Light: <b>solid</b>",
+    btn: ["Wake camera", "go", true] };
+  if (s.st === "BOOTING") return {
+    label: "Waking up…", cls: "busy", led: s.arec ? "blink" : "solid", hint: "A few seconds.",
+    light: "Light: whatever the camera is doing now", btn: ["Getting ready…", "wait", false] };
+  if (s.settle) return {
+    label: "Getting ready…", cls: "busy", led: "blink",
+    hint: "Stopping the camera's power-up recording.",
+    light: "Light: <b>slow blink</b>, then <b>solid</b> when done", btn: ["Getting ready…", "wait", false] };
+  if (s.st === "RECORDING") return {
+    label: "Recording", cls: "rec", led: "blink", hint: "Recording to the camera's SD card.",
+    light: "Light should be: <b>slow blink</b>", btn: ["■  Stop & save", "stop", true] };
+  if (s.st === "SAVING" || s.st === "STOPPING") return {
+    label: "Saving…", cls: "busy", led: "solid", hint: "Don't cut power yet.",
+    light: "Light should be: <b>solid</b>", btn: ["Saving…", "wait", false] };
+  return {
+    label: "Ready", cls: "ready", led: "solid", hint: "Ready to record.",
+    light: "Light should be: <b>solid</b>", btn: ["●  Start recording", "record", true] };
+}
+
+function actionFor(s) {
+  if (!s) return null;
+  if (s.st === "OFF") return "STANDBY";
+  if (s.st === "RECORDING") return "STOP";
+  if (s.st === "STANDBY" && !s.settle) return "REC";
+  return null;
+}
+
+function clock(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, x = sec % 60;
+  const mm = String(m).padStart(2, "0"), ss = String(x).padStart(2, "0");
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function render() {
+  const s = connected ? st : null;
+  const v = view(s);
+  $("status").className = "card status " + v.cls;
+  $("stateText").textContent = v.label;
+  $("hintText").textContent = v.hint || " ";
+  $("timer").textContent = s && s.rec ? clock((Date.now() - recStartLocal) / 1000) : "00:00";
+  $("led").className = "led " + (v.led === "blink" ? "blink" : v.led === "none" ? "none" : "");
+  $("lightText").innerHTML = v.light;
+
+  const btn = $("actionBtn");
+  btn.textContent = v.btn[0];
+  btn.className = "primary " + v.btn[1];
+  btn.disabled = busy || !v.btn[2] || !actionFor(s);
+
+  $("savedBanner").classList.toggle("hidden", !(showSaved && s && s.st === "STANDBY"));
+  $("uartBanner").classList.toggle("hidden", !(s && s.st === "STANDBY" && !s.uart));
+  $("syncRec").disabled = $("syncIdle").disabled = busy || !s || !["STANDBY", "RECORDING"].includes(s.st);
+
+  if (s) {
+    $("fullMin").textContent = s.full >= 60 ? `${Math.floor(s.full / 60)} h ${s.full % 60} min` : `${s.full} min`;
+    $("link").textContent = s.st === "OFF" ? "Not woken yet" : s.uart ? "OK" : "No reply";
+    const sw = $("arecSwitch");
+    if (document.activeElement !== sw) sw.checked = !!s.arec;
+  }
+}
+
+// ------------------------------------------------------------------- UI ---
+function showView() {
+  const ble = !!navigator.bluetooth;
+  $("noBle").classList.toggle("hidden", ble);
+  $("connectView").classList.toggle("hidden", !ble || connected);
+  $("mainView").classList.toggle("hidden", !connected);
+  render();
+}
+
+function setPill(text, cls) {
+  $("pillText").textContent = text;
+  $("pill").className = "pill " + cls;
+}
+
+// The firmware's replies are written for the serial console. On the main
+// screen, say the same thing in plain words; the Advanced log keeps the raw text.
+const FRIENDLY = [
+  [/^power on; camera starting/,           "Waking the camera…"],
+  [/^camera ready \(UART ok/,              "Camera connected."],
+  [/^camera powered, but no valid UART/,   "The camera isn't answering. Check its wires and power.", true],
+  [/^AUTOREC: will stop/,                  "Stopping the camera's power-up recording…"],
+  [/^AUTOREC: stopped/,                    "Power-up recording stopped. Ready to record."],
+  [/^camera still settling/,               "Almost ready, give it a few seconds."],
+  [/^recording started/,                   "Recording started."],
+  [/^recording stopped; saving/,           "Saving the video…"],
+  [/^file saved/,                          ""],
+  [/^noted: camera IS recording/,          "Got it: the remote now shows Recording."],
+  [/^noted: camera is NOT recording/,      "Got it: the remote now shows Ready."],
+  [/^autorec = ON/,                        "Power-up recording will be stopped automatically."],
+  [/^autorec = OFF/,                       "Power-up recording setting turned off."],
+  [/^RunCam-Ctl connected/,                ""],
+  [/^note: camera does not report/,        ""],
+];
+function friendly(line) {
+  for (const [re, text, warn] of FRIENDLY) if (re.test(line)) return [text, !!warn];
+  return [line, false];
+}
+
+function setMsg(text, warn) {
+  const m = $("msg");
+  m.textContent = text;
+  m.className = "msg" + (warn ? " warn" : "");
+}
+
+function log(text, mine) {
+  const el = $("log");
+  const d = document.createElement("div");
+  if (mine) d.className = "me";
+  d.textContent = (mine ? "> " : "") + text;
+  el.appendChild(d);
+  while (el.childNodes.length > 300) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+// Keep the phone screen on while connected, where the browser allows it.
+let wakeLock = null;
+async function keepAwake() {
+  try { if ("wakeLock" in navigator && !wakeLock) wakeLock = await navigator.wakeLock.request("screen"); }
+  catch (e) { /* not supported or not allowed: fine */ }
+  if (wakeLock) wakeLock.addEventListener("release", () => { wakeLock = null; });
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && connected) { keepAwake(); pollOutstanding = 0; poll(); }
+});
+
+$("connectBtn").onclick = connect;
+$("disconnectBtn").onclick = disconnect;
+$("actionBtn").onclick = () => { const c = actionFor(st); if (c) { showSaved = false; command(c); } };
+$("syncRec").onclick = () => { command("SYNC REC"); $("mismatch").open = false; };
+$("syncIdle").onclick = () => { command("SYNC IDLE"); $("mismatch").open = false; };
+$("arecSwitch").onchange = (e) => command(e.target.checked ? "AUTOREC ON" : "AUTOREC OFF");
+document.querySelectorAll("[data-cmd]").forEach((b) => b.onclick = () => command(b.dataset.cmd));
+function sendTyped() {
+  const v = $("cmdIn").value.trim();
+  if (v) { command(v); $("cmdIn").value = ""; }
+}
+$("sendBtn").onclick = sendTyped;
+$("cmdIn").addEventListener("keydown", (e) => { if (e.key === "Enter") sendTyped(); });
+
+// Tick the recording timer between polls.
+setInterval(() => { if (connected && st && st.rec) render(); }, 250);
+showView();
+</script>
+</body>
+</html>

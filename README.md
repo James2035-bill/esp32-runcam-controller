@@ -1,9 +1,10 @@
-# RunCam Split 4 controller — ESP32 over Wi-Fi
+# RunCam Split 4 controller — ESP32 over Bluetooth
 
-Control a RunCam Split 4 from an iPhone in Safari: the ESP32 runs its own
-Wi-Fi network and serves a control page. Standby, start recording, stop and
-save, power off, live status and a battery endurance estimate — no app to
-install. See [HARDWARE.md](HARDWARE.md) for wiring and the runtime numbers.
+Control a RunCam Split 4 from a phone over Bluetooth LE: the ESP32 advertises
+as **RunCam-Ctl** and the phone remote in [remote/](remote/index.html) gives
+one-tap Wake / Start recording / Stop & save. The older Wi-Fi control page is
+still in the firmware behind `USE_WIFI` (off by default, to save battery).
+See [HARDWARE.md](HARDWARE.md) for wiring and the runtime numbers.
 
 Board: **ESP32 DevKit V1 (Type-C)** — FQBN `esp32:esp32:esp32` ("ESP32 Dev Module")
 Silicon (confirmed on this board): ESP32-D0WD-V3 rev 301, 240 MHz, 4 MB flash
@@ -22,7 +23,26 @@ make flash     # upload then monitor
 make clean
 
 make intellisense   # rebuild VSCode include paths after a core/library change
+make remote         # serve the phone remote at http://localhost:8000 (open in Chrome)
 ```
+
+## Phone remote (Bluetooth)
+
+[remote/index.html](remote/index.html) is a single page that talks Web
+Bluetooth to the ESP32's Nordic UART service. It sends the same text commands
+as the serial console and polls `APP`, which the firmware answers with one
+`@S {json}` status line.
+
+- **iPhone:** Safari can't do Bluetooth. Open the page in the free **Bluefy**
+  browser. It must be loaded over `https://` (e.g. GitHub Pages).
+- **Android / Mac / Windows:** Chrome. On a Mac, `make remote` then open
+  http://localhost:8000.
+
+Tap **Connect**, pick **RunCam-Ctl**, then **Wake camera** → **Start
+recording** → **Stop & save**. The page always says what the camera's blue
+light should be doing (solid = idle, slow blink = recording); if it doesn't
+match, **Camera light doesn't match?** fixes it without pressing anything on
+the camera (`SYNC`).
 
 From VSCode: **Cmd-Shift-B** builds. Other targets are under
 *Terminal → Run Task…* → `ESP32: Upload`, `ESP32: Upload + Monitor`, etc.
