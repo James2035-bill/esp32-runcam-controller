@@ -802,9 +802,30 @@ static void setupBle() {
 }
 
 // Run queued phone commands and keep advertising whenever nobody is connected.
+// One-line status for the Bluetooth phone page, kept short because BLE sends
+// it in 20-byte chunks. The "@S " prefix tells the page it is not a message.
+static String appStatusJson() {
+  Endurance e = endurance();
+  uint32_t recSec = recording ? (millis() - recSince) / 1000 : 0;
+  String j = "{\"st\":\"" + String(stateName()) + "\"";
+  j += ",\"rec\":" + String(recording ? 1 : 0);
+  j += ",\"t\":" + String(recSec);
+  j += ",\"uart\":" + String(cam.responded() ? 1 : 0);
+  j += ",\"settle\":" + String(autoStopPending ? 1 : 0);
+  j += ",\"arec\":" + String(cfg.autoRec ? 1 : 0);
+  j += ",\"pwr\":" + String(cfg.recMethod == REC_PWRBTN ? 1 : 0);
+  j += ",\"full\":" + String((int)e.fullMin);
+  j += ",\"soc\":" + (e.sensor ? String((int)(e.soc * 100)) : String("null"));
+  j += "}";
+  return j;
+}
+
 static void serviceBle() {
   BleCmd cmd;
   while (xQueueReceive(bleQueue, &cmd, 0) == pdTRUE) {
+    // The phone page polls APP every couple of seconds: answer it directly,
+    // and keep it out of the serial log.
+    if (strcasecmp(cmd.text, "APP") == 0) { bleSend("@S " + appStatusJson()); continue; }
     Serial.println(String("[ble] > ") + cmd.text);
     handleCommand(String(cmd.text));
   }
