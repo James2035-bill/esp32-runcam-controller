@@ -391,6 +391,9 @@ static void reportStatus() {
                                                              : "CMD (start/stop commands)"));
   reply("autorec   : " + String(cfg.autoRec ? "ON" : "OFF") +
         (autoStopPending ? "  (waiting to stop the camera's own recording)" : ""));
+  reply("boot      : " + String(askLight
+        ? "ESP32-only restart -- camera state unknown: SYNC REC (light blinking) or SYNC IDLE (solid)"
+        : "normal"));
   reply("rail on   : " + fmtMinutes(railOnMs() / 60000.0f));
   reply("bluetooth : " + String(BLE_NAME) + (bleConnected ? "  (phone connected)" : "  (advertising)"));
   if (USE_WIFI)
