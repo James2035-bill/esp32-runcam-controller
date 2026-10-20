@@ -1,57 +1,201 @@
-# RunCam Split 4 controller — ESP32 over Bluetooth
+# ESP32 RunCam Split 4 Bluetooth controller
 
-Control a RunCam Split 4 from a phone over Bluetooth LE: the ESP32 advertises
-as **RunCam-Ctl** and the phone remote in [remote/](remote/index.html) gives
-one-tap Wake / Start recording / Stop & save. The older Wi-Fi control page is
-still in the firmware behind `USE_WIFI` (off by default, to save battery).
-See [HARDWARE.md](HARDWARE.md) for wiring and the runtime numbers.
+Start and stop a **RunCam Split 4** from your phone over Bluetooth. Built for a
+rocket payload camera, but it works for anything that carries a Split 4.
 
-Board: **ESP32 DevKit V1 (Type-C)** — FQBN `esp32:esp32:esp32` ("ESP32 Dev Module")
-Silicon (confirmed on this board): ESP32-D0WD-V3 rev 301, 240 MHz, 4 MB flash
-Serial port: shows up as `/dev/cu.usbserial-0001` (macOS native driver, nothing to install)
-Toolchain: `arduino-cli` 1.5.1 + Espressif `esp32` core 3.3.12, sharing
-`~/Library/Arduino15` with the Arduino IDE (so the same board shows up in both).
+- An **ESP32** talks to the camera over its UART control port (the RunCam
+  Device Protocol, the same one Betaflight and iNav use).
+- Your **phone** talks to the ESP32 over Bluetooth LE, using a one-page web
+  remote: **Wake camera → Start recording → Stop & save**.
+- Video is recorded by the camera, straight to **its own microSD card**. The
+  ESP32 never touches video.
 
-## Everyday commands
+**Phone remote:** https://james2035-bill.github.io/esp32-runcam-controller/
+(on iPhone, open it in the free **Bluefy** browser; see [Phone remote](#5-open-the-phone-remote)).
 
-```sh
-make ports     # what serial ports does macOS see?
-make build     # compile only
-make upload    # compile + flash
-make monitor   # serial monitor @ 115200 (Ctrl-C to quit)
-make flash     # upload then monitor
-make clean
-
-make intellisense   # rebuild VSCode include paths after a core/library change
-make remote         # serve the phone remote at http://localhost:8000 (open in Chrome)
+```
+  Phone (Bluefy / Chrome)          ESP32 DevKit                RunCam Split 4
+  ┌───────────────────┐  BLE   ┌────────────────┐  UART  ┌────────────────────┐
+  │  RunCam Remote    │ ◄────► │  RunCam-Ctl    │ ─────► │ records to its own │
+  │  web page         │        │  (this sketch) │ ◄───── │ microSD card       │
+  └───────────────────┘        └────────────────┘        └────────────────────┘
 ```
 
-## Phone remote (Bluetooth)
+---
 
-[remote/index.html](remote/index.html) is a single page that talks Web
-Bluetooth to the ESP32's Nordic UART service. It sends the same text commands
-as the serial console and polls `APP`, which the firmware answers with one
-`@S {json}` status line.
+## 1. Parts
 
-- **iPhone:** Safari can't do Bluetooth. Open the page in the free **Bluefy**
-  browser. It must be loaded over `https://` (e.g. GitHub Pages).
-- **Android / Mac / Windows:** Chrome. On a Mac, `make remote` then open
-  http://localhost:8000.
+This is the build it was developed and tested on. Similar parts work; the
+notes say what matters.
 
-Tap **Connect**, pick **RunCam-Ctl**, then **Wake camera** → **Start
-recording** → **Stop & save**. The page always says what the camera's blue
-light should be doing (solid = idle, slow blink = recording); if it doesn't
-match, **Camera light doesn't match?** fixes it without pressing anything on
-the camera (`SYNC`).
+| Part | Notes |
+|---|---|
+| **ESP32 DevKit V1** (ESP-WROOM-32) | Any ESP32 *WROOM* DevKit. A WROVER module uses GPIO16/17 for PSRAM, so the UART would have to move. |
+| **RunCam Split 4** + microSD card | Use a good card (U3), formatted **in the camera**. |
+| **5 V supply, at least 1.5 A** | Tested: **1S 450 mAh LiPo → 5 V boost converter**. On the bench, a USB wall charger or power bank (≥ 1 A) works too. |
+| **1S LiPo charger** | The ESP32 does not charge the battery. Charge at ≤ 1C (450 mA for a 450 mAh pack). |
+| Jumper wires, multimeter | The multimeter is for the power check in step 2. |
+| **Phone** | iPhone with the free **Bluefy** browser, or Android with Chrome. A Mac with Chrome also works. |
 
-From VSCode: **Cmd-Shift-B** builds. Other targets are under
-*Terminal → Run Task…* → `ESP32: Upload`, `ESP32: Upload + Monitor`, etc.
+**Not suitable as the camera's power source:** a computer's USB port, or the
+5 V pin of a dev board like an STM32 Nucleo. They can't supply the camera's
+current, and the camera will brown out and restart, dimming and flashing its
+lights and leaving broken files.
 
-If auto-detect grabs the wrong port:
+## 2. Wiring
+
+| ESP32 pin | Connects to | |
+|---|---|---|
+| **GPIO16 (RX2)** | camera **TX** | crossed: TX goes to RX |
+| **GPIO17 (TX2)** | camera **RX** | crossed: RX goes to TX |
+| **GND** | camera **GND** and supply **GND** | one shared ground; the UART needs it |
+| **VIN** | supply **5 V** | the same 5 V also feeds the camera's power input |
+| GPIO13 | *(optional)* load-switch enable | see [HARDWARE.md](HARDWARE.md) |
+| GPIO34 | *(optional)* battery-voltage divider | see [HARDWARE.md](HARDWARE.md) |
+
+```
+   5 V supply (boost converter / USB charger)
+     +5V ─────────┬──────────────────────────► camera VCC (+)
+                  └──────────────────────────► ESP32 VIN
+     GND ─────────┬──────────────────────────► camera GND
+                  └──────────────────────────► ESP32 GND
+
+   ESP32 GPIO16 (RX2) ◄────────────────────── camera TX
+   ESP32 GPIO17 (TX2) ───────────────────────► camera RX
+```
+
+- Leave the ESP32's **RX0/TX0** pins alone: they are its USB link to your
+  computer.
+- The camera's **yellow video wire** is not needed. Tape its end so it can't
+  short. (Connect it to an FPV monitor or a USB video capture adapter if you
+  want a live view or the camera's settings menu.)
+- **Check before powering:** no bare wire ends touching, and + / − the right
+  way round. With everything connected, measure the 5 V rail at the camera:
+  it should read **4.75–5.5 V**, including while recording.
+- Use only **one** source on the 5 V rail at a time. When the ESP32 is plugged
+  into your computer by USB, power the camera separately (shared GND).
+
+More detail (logic levels, load switch, battery divider, runtime tables) is in
+[HARDWARE.md](HARDWARE.md).
+
+## 3. Install the tools and flash the ESP32
+
+You need **arduino-cli** and Espressif's **esp32 board package 3.3.12**
+(tested). On macOS:
 
 ```sh
-make upload PORT=/dev/cu.usbserial-10
+brew install arduino-cli
+arduino-cli config init
+arduino-cli config add board_manager.additional_urls \
+  https://espressif.github.io/arduino-esp32/package_esp32_index.json
+arduino-cli core update-index
+arduino-cli core install esp32:esp32@3.3.12
 ```
+
+Then get this code and flash it, with the ESP32 plugged in by a **data** USB
+cable (charge-only cables don't create a serial port):
+
+```sh
+git clone https://github.com/James2035-bill/esp32-runcam-controller.git
+cd esp32-runcam-controller
+make flash
+```
+
+`make flash` compiles (silently, for **1–5 minutes** the first time: don't
+press Ctrl-C), uploads, then opens the serial monitor. Expect a burst of `??`
+garbage first (the bootloader at another baud rate), then:
+
+```
+=== RunCam controller ===
+[ble] advertising as "RunCam-Ctl" (Nordic UART) -- connect with a BLE UART app
+[wifi] off (USE_WIFI = false)
+```
+
+Press **Ctrl-C** to leave the monitor.
+
+**The Bluetooth build is about 1.7 MB, so it needs the "Huge APP" partition
+scheme.** The Makefile already sets it. Using the **Arduino IDE** instead:
+board **ESP32 Dev Module**, *Tools → Partition Scheme → Huge APP*, then Upload.
+
+**Upload stuck at `Connecting....`?** Hold the **BOOT** button on the ESP32
+until the percentages start.
+
+## 4. One-time setup
+
+These settings are saved in the ESP32's flash. Send them from the serial
+monitor (`make monitor`) or from the phone remote's **Advanced** console.
+
+**1. Recording method.** The Split 4 ignores the protocol's dedicated
+start/stop commands; a simulated power-button press is what toggles recording:
+
+```
+RECMODE PWRBTN
+```
+
+**2. Does your camera record by itself at power-up?** Put the card in, power
+the camera on, send nothing, and watch its blue light for 15 seconds:
+
+| Light settles to | Your camera… | Send |
+|---|---|---|
+| **slow blink** | starts recording at power-up (the Split 4's default) | `AUTOREC ON` |
+| **solid** | powers up idle | `AUTOREC OFF` |
+| **fast blink** | isn't reading the card: reseat or reformat it first | |
+
+With `AUTOREC ON`, tapping **Wake camera** stops that power-up recording
+(about 10 s after power-on), so Start and Stop then do what they say.
+
+**3. Your battery** (for the runtime estimate):
+
+```
+CAP 450
+CELLS 1
+```
+
+Check with `STATUS`: it should show `rec method: PWRBTN`, your `autorec`
+setting, and `boot : normal`.
+
+## 5. Open the phone remote
+
+Web Bluetooth only works from an `https://` address (or `localhost`) and
+only in some browsers:
+
+| Device | How |
+|---|---|
+| **iPhone / iPad** | Install **Bluefy** (free, App Store). Open the remote link in Bluefy. Safari can't use Bluetooth. |
+| **Android** | Open the remote link in **Chrome**. |
+| **Mac / Windows** | Chrome, with the link above. Or run `make remote` and open http://localhost:8000. That only works on the same computer, not on your phone. |
+
+Remote link: **https://james2035-bill.github.io/esp32-runcam-controller/**
+(served from [`docs/index.html`](docs/index.html) by GitHub Pages; if you fork
+this repo, turn on Pages for the `main` branch, `/docs` folder, and use your
+own link).
+
+**RunCam-Ctl won't appear in your phone's Bluetooth settings.** That's
+normal for this kind of device: tap **Connect** in the remote and pick it from
+the list there.
+
+## 6. Record
+
+1. Power everything on (card in the camera).
+2. Open the remote, tap **Connect**, and pick **RunCam-Ctl**.
+3. Tap **Wake camera**. Wait for **Ready**: the camera light goes **solid**.
+4. Tap **Start recording**: the light **blinks slowly**.
+5. Tap **Stop & save**: the light goes **solid**. Wait for **"Video saved"**.
+6. Only now cut power. Then take out the card and copy the video.
+
+The remote always shows what the camera's light should be doing. If it
+doesn't match, open **Camera light doesn't match?** and tap what you see. That
+puts the remote back in step without pressing anything on the camera.
+
+| Camera blue light | Meaning |
+|---|---|
+| solid | idle, not recording |
+| slow blink | recording |
+| fast blink | no SD card, or a card problem |
+
+**First time: do the 20-second test.** Record exactly 20 s, stop and save,
+power off, and play the newest file on a computer. You should find one
+~20-second clip (plus a short clip from power-up if `AUTOREC` is on).
 
 ## Keeping recordings safe
 
@@ -59,133 +203,101 @@ An MP4 that loses power before the camera finishes writing it is usually
 unplayable, so almost every rule here is about power:
 
 - **Only cut power when the light is solid**, at least 5 s after Stop (the
-  page says "Video saved"). Never pull the SD card with the camera powered.
-- **Battery:** there is no voltage sensor yet, so the page estimates what's
-  left from time on since power-up, assuming a full pack, and warns at ~5 min.
-  It is not an automatic stop: on an estimate alone that could end a flight
-  recording early. Charge before every flight.
-- **Wake the camera soon after power-up.** The camera records from power-on
-  (auto-record) until Wake stops it, filling the card.
+  remote says "Video saved"). Never pull the SD card with the camera powered.
+- **Battery:** with no voltage sensor fitted, the remote estimates what's
+  left from the time since power-up, assuming a full pack, and warns at
+  ~5 min. It's not an automatic stop: on an estimate alone that could end a
+  flight recording early. Charge before every flight.
+- **Wake the camera soon after power-up.** With auto-record, the camera
+  records from power-on until Wake stops it, filling the card.
 - **Auto-record is also a flight safety net:** if power glitches mid-flight,
   the camera restarts and records again by itself. That's why the ESP32 never
-  stops the power-up recording without you tapping Wake.
-- **If the ESP32 restarts on its own** (crash or watchdog) the camera kept its
-  power and may be recording, so the page asks what the light shows and
+  stops the power-up recording until you tap Wake.
+- **If the ESP32 restarts on its own** (crash or watchdog), the camera kept
+  its power and may be recording, so the remote asks what the light shows and
   blocks Start until you answer.
 - **Card:** format it in the camera, keep **loop recording off** (so a full
   card can't overwrite a flight), and tape it in for flight. Secure the
   battery connector: a popped plug mid-flight is the likeliest way to lose
   the video.
+- **On the launch pad:** confirm the light is **slow blinking** before you
+  walk away. Bluetooth range is roughly 10–30 m, and the camera keeps
+  recording without the phone.
 
-## Connecting from your iPhone
+## Troubleshooting
 
-1. Power the ESP32. It creates a Wi-Fi network:
-   **`RunCam-Ctl`**, password **`runcam1234`** (change both in Settings).
-2. iPhone: **Settings → Wi-Fi → RunCam-Ctl**. iOS will say *No Internet
-   Connection* — that's expected; stay joined. Mobile data still works for
-   other apps.
-3. Open Safari at **http://192.168.4.1** (or **http://runcam.local**).
-4. Optional: Share → **Add to Home Screen** for a full-screen app icon.
-
-The page polls the ESP32 every second, so status stays live and several
-phones can have it open at once.
-
-| Button | Does |
+| Symptom | Cause and fix |
 |---|---|
-| **Standby** | powers the camera and waits for it to be ready (~3 s) |
-| **Start recording** | sends the RunCam start-record command |
-| **Stop & save** | sends stop-record, then holds ~2.5 s while the file finalises |
-| **Power off** | two taps; saves any recording first, then cuts power completely |
+| `camera powered, but no valid UART reply` / "camera isn't answering" | TX and RX must be **crossed** (camera TX → GPIO16, camera RX → GPIO17), GND shared, camera powered. |
+| Footage starts **after** you press Stop; Start seems to stop it | The camera records at power-up and the ESP32 doesn't know it. `AUTOREC ON` (step 4). If it happens once, use **Camera light doesn't match?** |
+| Camera light **blinks fast** | No SD card, or the card is unreadable. Power off, reseat it, or reformat in the camera. |
+| Lights go **dim and flicker**; the ESP32 disappears from USB mid-upload | The supply can't deliver the current, or there's a short. Find shorts first, then use a stronger 5 V source (step 1). |
+| `make flash` seems to hang | It's compiling (1–5 min, silent). Don't press Ctrl-C. If it stops at `Connecting....`, hold **BOOT**. |
+| `??????` at the start of the serial monitor | Normal: bootloader output at a different baud rate. |
+| Remote stuck on "Connecting…" / "No status from the controller" | Flash the latest firmware; older builds don't answer the remote's status request. |
+| Remote shows "Check the camera's blue light" | The ESP32 restarted without the camera losing power. Answer what the light is doing. |
+| `localhost:8000` doesn't load on the phone | `localhost` means "this device". Use the https link on the phone. |
+| RunCam-Ctl isn't in the phone's Bluetooth settings | Normal. Connect from inside the remote (Bluefy / Chrome). |
+| No serial port appears | Use a **data** USB cable. `make ports` lists what the computer sees. |
 
-### HTTP API
+## Console commands
 
-| Method | Path | Does |
-|---|---|---|
-| GET | `/api/status` | JSON: state, recording time, battery, settings |
-| POST | `/api/standby` | power on → STANDBY |
-| POST | `/api/record` | start recording |
-| POST | `/api/stop` | stop & save |
-| POST | `/api/off` | save if needed, then cut power |
-| POST | `/api/cmd` | any console command, form field `c` (e.g. `c=INFO`) |
-
-Control actions return `{ok, msg, status}`; a refused action (e.g. record
-before standby) returns HTTP 409 with the reason in `msg`.
-
-States: `OFF` → `BOOTING` → `STANDBY` ⇄ `RECORDING` → `SAVING` → `STANDBY`,
-and `STOPPING` (saving, then power off).
-
-### Console commands
-
-The same commands work in the page's Console panel and on the USB serial
-console at 115200. Case-insensitive.
+Work on the USB serial console (115200) and in the remote's **Advanced**
+console. Case-insensitive. Settings persist in flash.
 
 | Command | Does |
 |---|---|
-| `STANDBY` (or `ON`) | power on and get ready |
+| `STANDBY` (or `ON`) | wake the camera and get ready |
 | `REC` / `STOP` | start / stop-and-save recording |
-| `OFF` | cut power (saves any recording first) |
-| `PWRBTN` | simulate the power button — camera standby, still powered |
-| `WIFI` / `MODE` | simulate the camera's wifi button / change mode |
-| `INFO` | probe the camera over UART, list the features it reports |
-| `FRAMES` | dump the exact protocol bytes sent (CRC check / logic analyser) |
-| `STATUS` / `RUNTIME` | state and battery / endurance estimate |
-| `CAP <mAh>` | pack capacity |
-| `WATTS <mW>` / `DRAW <mA>` | measured camera power, or derive it from a current reading |
-| `CELLS <n>` | cells in series, 0 = auto-detect |
-| `RESERVE <pct>` | reserve floor, default 15% |
-| `SSID <name>` / `PASS <pw>` | Wi-Fi network name / password (8–63 chars) |
-| `RESTART` | reboot to apply Wi-Fi changes (camera must be off) |
+| `OFF` | cut camera power via the load switch, saving first (without a load switch it only tells you when it's safe to unplug) |
+| `RECMODE CMD\|PWRBTN` | how REC/STOP reach the camera: dedicated commands, or the power-button toggle (Split 4: `PWRBTN`) |
+| `AUTOREC ON\|OFF` | the camera records by itself at power-up; Wake stops it |
+| `SYNC REC\|IDLE` | tell the ESP32 what the camera light shows (sends nothing to the camera) |
+| `PWRBTN` | press the camera's button once (toggles recording) |
+| `WIFI` / `MODE` | simulate the camera's Wi-Fi button / change mode |
+| `INFO` | probe the camera over UART and list the features it reports |
+| `FRAMES` | print the exact protocol bytes sent (to check against a logic analyser) |
+| `STATUS` / `RUNTIME` | state, boot type, settings / battery estimate |
+| `CAP <mAh>` / `CELLS <n>` / `RESERVE <pct>` | battery capacity / cells in series (0 = auto) / reserve floor |
+| `WATTS <mW>` / `DRAW <mA>` | measured camera power, or derive it from a current reading (needs the divider) |
+| `ESPWATTS <mW>` | ESP32 power, for the estimate |
+| `SSID <name>` / `PASS <pw>` / `RESTART` | Wi-Fi settings (Wi-Fi builds only); reboot |
 
-Settings persist in flash across power cycles. If a saved Wi-Fi setting is
-ever rejected at boot, the ESP32 falls back to the defaults above so you
-can't lock yourself out.
+`APP` is used by the remote: the firmware answers with one `@S {json}` status
+line over Bluetooth.
 
-## Getting the video
+## Options in the sketch
 
-The ESP32 only *controls* the camera — video is recorded to the Split 4's
-own microSD card and never passes through the ESP32 (its link is far too
-slow for video files). To get footage: power off from the page, take out
-the microSD card, and read it with a card reader — on iPhone, a Lightning
-or USB-C SD reader shows the files in the **Files** app.
+At the top of [esp32_project.ino](esp32_project.ino):
 
-## Two kinds of "off"
+| Setting | Default | |
+|---|---|---|
+| `USE_WIFI` | `false` | `true` brings back the older Wi-Fi access point and control page (http://192.168.4.1, network `RunCam-Ctl`, password `runcam1234`: change it with `PASS`). Bluetooth stays on. |
+| `LOAD_SWITCH_FITTED` | `false` | set `true` once a load switch on GPIO13 can cut the camera's power |
+| `VBAT_SENSOR_FITTED` | `false` | set `true` once a battery divider is on GPIO34 (then the remote shows measured charge) |
+| `FILE_CLOSE_MS` | 5000 | wait after Stop before the file counts as saved |
+| `AUTOREC_SETTLE_MS` | 10000 | how long after power-up before Wake may stop the camera's own recording; raise it if your camera takes longer to start recording |
 
-The page's **Standby** keeps the camera powered and ready. Separately,
-`PWRBTN` asks the camera to go to its own standby — the board stays powered and keeps
-drawing current. `OFF` opens a load switch and removes power completely, which
-is the one that saves battery. `OFF` always stops recording and waits ~2.5 s for
-the file to close first, because cutting power mid-write corrupts microSD cards.
+## Repository layout
 
-## Gotchas on this board
+| Path | |
+|---|---|
+| `esp32_project.ino` | the firmware: state machine, Bluetooth link, console |
+| `runcam.h` / `runcam.cpp` | RunCam Device Protocol (CRC8 DVB-S2 frames over UART) |
+| `docs/index.html` | the phone remote (Web Bluetooth), served by GitHub Pages |
+| `web_ui.h` | the older Wi-Fi control page (only used when `USE_WIFI = true`) |
+| `HARDWARE.md` | wiring detail, power, load switch, battery divider, runtimes |
+| `Makefile` | `make build`, `make flash`, `make monitor`, `make remote`, `make ports` |
+| `tools/gen_intellisense.py`, `.vscode/` | VS Code IntelliSense setup (`make intellisense`) |
 
-- **Use a data USB-C cable.** Charge-only cables power the board but create no
-  serial port — the single most common "it doesn't show up" cause.
-- **Status LED (GPIO2):** slow pulse = off, fast blink = starting or saving,
-  solid = standby, double flash = recording.
-- **Hold BOOT if upload fails.** If you see
-  `Failed to connect ... Wrong boot mode detected`, hold the **BOOT** button,
-  start the upload, and release once "Connecting..." turns into writing.
-- **GPIO6–11 are wired to the internal flash.** Never use them for I/O.
-- **GPIO34–39 are input-only** — no `digitalWrite`, no pullups.
-- **ADC2 pins don't work while Wi-Fi is on.** The battery sense is on GPIO34
-  (ADC1) for that reason.
+## Board notes
+
+- **Status LED (GPIO2):** slow pulse = asleep, fast blink = starting or
+  saving, solid = ready, double flash = recording.
+- **GPIO6–11** are wired to the internal flash: never use them.
+- **GPIO34–39** are input-only. The battery sense is on GPIO34 (ADC1), which
+  keeps working with the radio on.
 - `Serial` is the USB console at 115200. `Serial2` (GPIO16/17) talks to the
   camera and must not be used for anything else.
-- **GPIO16/17 are free only on WROOM-32.** A WROVER module uses them for PSRAM.
-
-## IntelliSense
-
-`.vscode/c_cpp_properties.json` is generated, not hand-written — the ESP32 core
-hides most of its ~360 include dirs behind gcc `@response` files, so the only
-reliable source is a real compile command. After upgrading the core or adding a
-library, run `make intellisense` to regenerate it.
-
-## Adding libraries
-
-```sh
-arduino-cli lib search <name>
-arduino-cli lib install "Adafruit NeoPixel"
-```
-
-Installed libraries land in the shared sketchbook, so the Arduino IDE sees
-them too.
+- After upgrading the esp32 core or adding a library, run
+  `make intellisense` to regenerate VS Code's include paths.

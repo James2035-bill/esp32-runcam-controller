@@ -1,5 +1,11 @@
 # Wiring: ESP32 DevKit (WROOM-32) -> RunCam Split 4
 
+**Tested build:** one 5 V rail from a **1S 450 mAh LiPo through a 5 V boost
+converter** feeds both the ESP32's VIN and the camera's power input; three
+wires (TX, RX, GND) carry control. No load switch and no battery divider are
+fitted, so `LOAD_SWITCH_FITTED` and `VBAT_SENSOR_FITTED` are `false`. The
+load switch, divider and bigger-pack material below are optional upgrades.
+
 ## Pin map
 
 | ESP32 pin | Goes to | Notes |
@@ -62,10 +68,10 @@ sense on ADC1 (GPIO32–39).
 
 | Command | Mechanism | Current after | Use |
 |---|---|---|---|
-| `PWRBTN` | RunCam protocol, power-button simulation | still drawing | quick standby |
-| `OFF` | opens the load switch | **zero** | saving battery |
+| `PWRBTN` | RunCam protocol, power-button simulation | still drawing | on the Split 4 this **toggles recording**; it does not put the camera to sleep |
+| `OFF` | opens the load switch | **zero** | saving battery (needs a load switch) |
 
-`OFF` stops recording and waits ~2.5 s for the file to close before cutting
+`OFF` stops recording and waits 5 s for the file to close before cutting
 power. Pulling the rail mid-write is the standard way to corrupt a microSD
 card and lose the clip.
 
@@ -127,8 +133,9 @@ is: pack → camera VIN (through the load switch), and pack → buck → ESP32.
 
 **Using a 5 V BEC** (the usual choice on a drone or RC build): feed the BEC's
 5 V into the DevKit's **VIN** pin (or **5V** — same net on most DevKit V1
-boards) and its ground into **GND**. Size it for at least **500 mA** — Wi-Fi
-transmit bursts pull ~250–350 mA and a weak supply causes brownout resets.
+boards) and its ground into **GND**. Size it for at least **500 mA** — radio
+transmit bursts (Wi-Fi especially) pull ~250–350 mA and a weak supply causes
+brownout resets.
 Don't power the ESP32 from USB and a BEC at the same time unless your board
 has a diode on the USB 5 V line.
 
@@ -148,10 +155,12 @@ button exactly as a finger would.
 This is not built into the firmware, on purpose: what each press does
 (start/stop, mode change, power) depends on the camera's button mapping and
 the current mode, and the ESP32 gets no feedback, so its idea of "recording"
-can drift from reality. The UART protocol has distinct start and stop commands
-and reports what the camera supports, which is why it's the default. If you
-need the fallback, check which pads your board's button uses, and it can be
-added as an option.
+can drift from reality. The UART route has the same blind-toggle problem on
+the Split 4 (its firmware ignores the dedicated start/stop commands, so
+`RECMODE PWRBTN` is used), but at least `AUTOREC`, `SYNC` and the remote's
+"what should the light be doing" hint exist to keep it in step. If you need
+the button-pad fallback, check which pads your board's button uses, and it
+can be added as an option.
 
 ## Handling the flex cable
 
@@ -183,7 +192,13 @@ pack_Wh = nominal_voltage x capacity_Ah      e.g. 11.1 V x 2.2 Ah = 24.4 Wh
 Quoting the camera as "350 mA" is only meaningful alongside a voltage — the
 same 2 W camera pulls 541 mA from 1S but only 180 mA from 3S.
 
-## Estimates (15% reserve, ESP32 + Wi-Fi AP at 0.7 W)
+## Estimates (15% reserve, ESP32 at 0.7 W)
+
+The ESP32 figure assumes the Wi-Fi access point is on. The default Bluetooth
+build draws less (`ESPWATTS` sets the figure used by the firmware's estimate).
+The tested 1S 450 mAh pack (1.7 Wh) gives roughly **30 minutes** with the
+camera at an assumed 2 W.
+
 
 | Pack | Wh | 1.0 W | 1.5 W | 2.0 W | 2.5 W | 3.0 W | 3.5 W |
 |---|---|---|---|---|---|---|---|

@@ -70,7 +70,7 @@ intellisense: build
 # testing from Chrome on this Mac. Ctrl-C to stop.
 remote:
 	@echo "Open http://localhost:8000 in Chrome. Ctrl-C to stop."
-	cd remote && python3 -m http.server 8000
+	cd docs && python3 -m http.server 8000
 
 clean:
 	rm -rf $(BUILDDIR)
