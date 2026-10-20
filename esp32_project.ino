@@ -32,6 +32,7 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <esp_system.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLE2902.h>
@@ -102,9 +103,14 @@ static uint32_t stateSince = 0;
 static bool recording = false;
 static uint32_t recSince = 0;       // millis() when REC was sent
 // The camera has just been powered and has not yet had its one AUTOREC stop.
-// Without a load switch the camera powers up with the ESP32, so this starts
-// true at boot; with one, every Standby re-powers the camera.
+// Without a load switch the camera powers up with the ESP32, so this is set
+// at boot from the reset reason; with one, every Standby re-powers the camera.
 static bool camFreshPower = true;
+// The ESP32 restarted (crash, watchdog, RESTART) while the camera most likely
+// kept its power, so whether it is recording is unknown. Pressing anything
+// could start a recording instead of stopping one: ask the user what the
+// light shows (SYNC REC / SYNC IDLE) before REC is allowed.
+static bool askLight = false;
 // AUTOREC: waiting to stop the camera's auto-started recording. REC is
 // refused until then, or it would toggle that recording off.
 static bool autoStopPending = false;
@@ -126,6 +132,10 @@ static const uint32_t MIN_PRESS_GAP_MS = 2000;
 // actually begun recording by then, or the press would START a recording.
 // Time yours (power on -> recording light blinking) and keep this longer.
 static const uint32_t AUTOREC_SETTLE_MS = 10000;
+
+// Warn (once per recording) when the estimated battery left drops to this.
+// A pack that sags out mid-recording leaves an unplayable file.
+static const float LOW_BATT_WARN_MIN = 5.0f;
 
 // ----------------------------------------------------- tunable settings -----
 // How REC/STOP talk to the camera. Some Split firmware ignores the dedicated
@@ -155,6 +165,8 @@ struct Endurance {
   bool sensor;          // false: volts/soc/remainingMin are not meaningful
   float remainingMin;   // at present draw, down to the reserve
   float fullMin;        // from 100% with the camera on
+  float leftMin;        // best guess at what's left: measured, or estimated
+  bool  leftEstimated;  // true: from time on since power-up, not a reading
 };
 
 static Settings cfg = { 450, 2000, 700, 1, 15, REC_CMD, 0 };
@@ -337,10 +349,26 @@ static Endurance endurance() {
 
   float camW = cfg.camPowerMw / 1000.0f;
   float espW = cfg.espPowerMw / 1000.0f;
-  e.wNow  = espW + (camState == CAM_OFF ? 0.0f : camW);
+  // Without a load switch the camera draws power whatever state we are in.
+  bool camPowered = !LOAD_SWITCH_FITTED || camState != CAM_OFF;
+  e.wNow  = espW + (camPowered ? camW : 0.0f);
   e.wFull = espW + camW;
   e.remainingMin = (e.sensor && e.wNow > 0.01f) ? availWh / e.wNow * 60.0f : -1;
   e.fullMin = (e.wFull > 0.01f) ? e.packWh * (1.0f - reserve) / e.wFull * 60.0f : 0;
+
+  // No sensor: estimate from energy used since power-up, assuming the pack
+  // was full then. Rough (camera power is assumed until measured), but it is
+  // the only warning before the pack sags and cuts a recording off.
+  e.leftEstimated = !e.sensor;
+  if (e.sensor) {
+    e.leftMin = e.remainingMin;
+  } else {
+    float upH  = millis() / 3600000.0f;
+    float camH = (LOAD_SWITCH_FITTED ? railOnMs() : millis()) / 3600000.0f;
+    float usedWh = espW * upH + camW * camH;
+    float leftWh = e.packWh * (1.0f - reserve) - usedWh;
+    e.leftMin = (e.wNow > 0.01f) ? max(0.0f, leftWh) / e.wNow * 60.0f : 0;
+  }
   return e;
 }
 
@@ -381,7 +409,8 @@ static void reportRuntime() {
   reply("power     : camera " + String(cfg.camPowerMw / 1000.0f, 2) + " W + esp " +
         String(cfg.espPowerMw / 1000.0f, 2) + " W");
   if (!e.sensor) {
-    reply("remaining : unknown -- no battery sensor");
+    reply("remaining : ~" + fmtMinutes(e.leftMin) +
+          "  (no sensor: estimated from time on, assumes the pack was full at power-up)");
   } else if (e.wNow > 0.01f) {
     reply("remaining : " + fmtMinutes(e.remainingMin) +
           "  at the present " + String(e.wNow, 2) + " W");
@@ -421,7 +450,7 @@ static bool doStandby() {
   if (camState != CAM_OFF)              { reply("camera is saving a file -- wait"); return false; }
   setRail(true);
   onSince = millis();
-  if (LOAD_SWITCH_FITTED) camFreshPower = true;
+  if (LOAD_SWITCH_FITTED) { camFreshPower = true; askLight = false; }   // re-powered: known idle
   enterState(CAM_BOOTING);
   reply("power on; camera starting (~3 s)");
   return true;
@@ -432,6 +461,10 @@ static bool doRecord() {
   if (recording)          { reply("already recording"); return true; }
   if (autoStopPending) {
     reply("camera still settling after power-up (AUTOREC) -- REC will be ready in a few seconds");
+    return false;
+  }
+  if (askLight) {
+    reply("check the camera light first: SYNC REC if it blinks slowly, SYNC IDLE if solid");
     return false;
   }
   camRecord(true);
@@ -538,12 +571,14 @@ static bool handleCommand(String line) {
     if (m == "REC") {
       if (!recording) { recording = true; recSince = millis(); }
       autoStopPending = false;
+      askLight = false;
       reply("noted: camera IS recording (nothing sent) -- STOP will stop it");
       return true;
     }
     if (m == "IDLE") {
       recording = false;
       autoStopPending = false;
+      askLight = false;
       reply("noted: camera is NOT recording (nothing sent) -- REC will start it");
       return true;
     }
@@ -641,7 +676,7 @@ static bool handleCommand(String line) {
     reply("REC             start recording");
     reply("STOP            stop recording and save the file");
     reply("OFF             cut camera power (saves any recording first)");
-    reply("PWRBTN          simulate power button (camera standby, still powered)");
+    reply("PWRBTN          press the camera's button once (toggles recording)");
     reply("WIFI / MODE     simulate wifi button / change mode");
     reply("RECMODE CMD|PWRBTN  how REC/STOP reach the camera (saved)");
     reply("AUTOREC ON|OFF  camera records by itself at power-up? (saved)");
@@ -801,7 +836,6 @@ static void setupBle() {
   BLEDevice::startAdvertising();
 }
 
-// Run queued phone commands and keep advertising whenever nobody is connected.
 // One-line status for the Bluetooth phone page, kept short because BLE sends
 // it in 20-byte chunks. The "@S " prefix tells the page it is not a message.
 static String appStatusJson() {
@@ -815,11 +849,15 @@ static String appStatusJson() {
   j += ",\"arec\":" + String(cfg.autoRec ? 1 : 0);
   j += ",\"pwr\":" + String(cfg.recMethod == REC_PWRBTN ? 1 : 0);
   j += ",\"full\":" + String((int)e.fullMin);
+  j += ",\"left\":" + String((int)e.leftMin);
+  j += ",\"est\":" + String(e.leftEstimated ? 1 : 0);
+  j += ",\"ask\":" + String(askLight ? 1 : 0);
   j += ",\"soc\":" + (e.sensor ? String((int)(e.soc * 100)) : String("null"));
   j += "}";
   return j;
 }
 
+// Run queued phone commands and keep advertising whenever nobody is connected.
 static void serviceBle() {
   BleCmd cmd;
   while (xQueueReceive(bleQueue, &cmd, 0) == pdTRUE) {
@@ -857,10 +895,21 @@ void setup() {
   loadSettings();
   cam.begin(Serial2, PIN_CAM_RX, PIN_CAM_TX);
 
+  // Power-up and brownout mean the camera lost power with us (on the ESP32,
+  // the EN button also reports as power-up). A crash, watchdog or RESTART
+  // means only the ESP32 restarted: without a load switch the camera kept
+  // running, so whether it is recording is unknown until the user says.
+  esp_reset_reason_t why = esp_reset_reason();
+  camFreshPower = (why == ESP_RST_POWERON || why == ESP_RST_BROWNOUT);
+  askLight = !camFreshPower && !LOAD_SWITCH_FITTED;
+
   Serial.println();
   Serial.println("=== RunCam controller ===");
   Serial.printf("chip %s rev %d, %lu MHz\n", ESP.getChipModel(),
                 ESP.getChipRevision(), (unsigned long)getCpuFrequencyMhz());
+  Serial.printf("reset reason %d: %s\n", (int)why,
+                camFreshPower ? "power-up (camera powered up too)"
+                              : "ESP32-only restart -- camera state unknown, check its light");
 
   setupBle();
   Serial.printf("[ble] advertising as \"%s\" (Nordic UART) -- connect with a BLE UART app\n",
@@ -921,6 +970,23 @@ void loop() {
       autoStopPending = false;
       camRecord(false);
       reply("AUTOREC: stopped the camera's own recording -- light should show standby; REC is ready");
+    }
+  }
+
+  // Low battery while recording: warn once, so there is time to stop and
+  // save before the pack sags and cuts the file off. Deliberately not an
+  // automatic stop: on an estimate alone that could end a flight recording.
+  static uint32_t battCheckAt = 0;
+  static bool lowWarned = false;
+  if (!recording) {
+    lowWarned = false;
+  } else if (!lowWarned && now - battCheckAt >= 5000) {
+    battCheckAt = now;
+    Endurance e = endurance();
+    if (e.leftMin <= LOW_BATT_WARN_MIN) {
+      lowWarned = true;
+      reply("LOW BATTERY" + String(e.leftEstimated ? " (estimated)" : "") + ": about " +
+            fmtMinutes(e.leftMin) + " left -- stop and save soon");
     }
   }
 
