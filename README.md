@@ -53,6 +53,30 @@ If auto-detect grabs the wrong port:
 make upload PORT=/dev/cu.usbserial-10
 ```
 
+## Keeping recordings safe
+
+An MP4 that loses power before the camera finishes writing it is usually
+unplayable, so almost every rule here is about power:
+
+- **Only cut power when the light is solid**, at least 5 s after Stop (the
+  page says "Video saved"). Never pull the SD card with the camera powered.
+- **Battery:** there is no voltage sensor yet, so the page estimates what's
+  left from time on since power-up, assuming a full pack, and warns at ~5 min.
+  It is not an automatic stop: on an estimate alone that could end a flight
+  recording early. Charge before every flight.
+- **Wake the camera soon after power-up.** The camera records from power-on
+  (auto-record) until Wake stops it, filling the card.
+- **Auto-record is also a flight safety net:** if power glitches mid-flight,
+  the camera restarts and records again by itself. That's why the ESP32 never
+  stops the power-up recording without you tapping Wake.
+- **If the ESP32 restarts on its own** (crash or watchdog) the camera kept its
+  power and may be recording, so the page asks what the light shows and
+  blocks Start until you answer.
+- **Card:** format it in the camera, keep **loop recording off** (so a full
+  card can't overwrite a flight), and tape it in for flight. Secure the
+  battery connector: a popped plug mid-flight is the likeliest way to lose
+  the video.
+
 ## Connecting from your iPhone
 
 1. Power the ESP32. It creates a Wi-Fi network:
