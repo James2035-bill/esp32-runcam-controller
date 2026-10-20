@@ -155,6 +155,16 @@
     </div>
   </div>
 
+  <div id="askCard" class="card hidden">
+    <strong>Check the camera's blue light</strong>
+    <p class="hint" style="text-align:left;margin:6px 0 12px">The controller restarted, so it doesn't know whether the camera is recording. What is the light doing?</p>
+    <div class="row">
+      <button id="askRec" class="small">Blinking slowly<br><small>(recording)</small></button>
+      <button id="askIdle" class="small">Solid<br><small>(not recording)</small></button>
+    </div>
+  </div>
+
+  <div id="lowBanner" class="banner warn hidden"></div>
   <div id="savedBanner" class="banner ok hidden">Video saved. It's safe to power off once the camera light is solid.</div>
   <div id="uartBanner" class="banner warn hidden">The camera isn't answering. Check its TX/RX wires and power, then tap <b>Wake camera</b> again.</div>
 
@@ -173,7 +183,7 @@
   </details>
 
   <div class="card facts">
-    <div><div class="k">Full battery lasts</div><div class="v" id="fullMin">–</div></div>
+    <div><div class="k" id="battLabel">Battery left</div><div class="v" id="fullMin">–</div></div>
     <div><div class="k">Camera link</div><div class="v" id="link">–</div></div>
   </div>
 
@@ -247,6 +257,12 @@ async function connect() {
       onData(new TextDecoder().decode(e.target.value)));
     connected = true;
     userDisconnect = false;
+    st = null;
+    const t0 = Date.now();
+    setTimeout(() => {
+      if (connected && !st && Date.now() - t0 >= 6000)
+        setMsg("No status from the controller. Is the latest firmware flashed on the ESP32?", true);
+    }, 6000);
     writeChain = Promise.resolve();
     showView();
     setPill("Connected", "on");
@@ -341,12 +357,15 @@ function view(s) {
   if (!s) return { label: "Connecting…", cls: "busy", hint: "", led: "none", light: "Camera light", btn: ["Please wait", "wait", false] };
   if (s.st === "OFF") return {
     label: "Camera asleep", cls: "", led: s.arec ? "blink" : "solid",
-    hint: "Tap Wake camera to get ready.",
+    hint: s.arec ? "Tap Wake camera now: until then it's recording and filling the card." : "Tap Wake camera to get ready.",
     light: s.arec ? "Light: <b>slow blink</b> until you wake it (camera records at power-up)" : "Light: <b>solid</b>",
     btn: ["Wake camera", "go", true] };
   if (s.st === "BOOTING") return {
     label: "Waking up…", cls: "busy", led: s.arec ? "blink" : "solid", hint: "A few seconds.",
     light: "Light: whatever the camera is doing now", btn: ["Getting ready…", "wait", false] };
+  if (s.ask && s.st === "STANDBY") return {
+    label: "Check the camera", cls: "busy", led: "none", hint: "Answer the question below first.",
+    light: "Look at the camera's blue light", btn: ["Answer the question below", "wait", false] };
   if (s.settle) return {
     label: "Getting ready…", cls: "busy", led: "blink",
     hint: "Stopping the camera's power-up recording.",
@@ -366,7 +385,7 @@ function actionFor(s) {
   if (!s) return null;
   if (s.st === "OFF") return "STANDBY";
   if (s.st === "RECORDING") return "STOP";
-  if (s.st === "STANDBY" && !s.settle) return "REC";
+  if (s.st === "STANDBY" && !s.settle && !s.ask) return "REC";
   return null;
 }
 
@@ -396,8 +415,20 @@ function render() {
   $("uartBanner").classList.toggle("hidden", !(s && s.st === "STANDBY" && !s.uart));
   $("syncRec").disabled = $("syncIdle").disabled = busy || !s || !["STANDBY", "RECORDING"].includes(s.st);
 
+  const ask = !!(s && s.ask && s.st === "STANDBY");
+  $("askCard").classList.toggle("hidden", !ask);
+  $("askRec").disabled = $("askIdle").disabled = busy;
+  const left = s && typeof s.left === "number" ? s.left : null;
+  const low = left !== null && left <= 5;
+  $("lowBanner").classList.toggle("hidden", !low);
+  if (low) $("lowBanner").textContent = s.rec
+    ? `Battery low: about ${left} min left. Stop and save soon so the video isn't cut off.`
+    : `Battery low: about ${left} min left. Charge it before recording.`;
+
   if (s) {
-    $("fullMin").textContent = s.full >= 60 ? `${Math.floor(s.full / 60)} h ${s.full % 60} min` : `${s.full} min`;
+    const mins = (m) => m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`;
+    $("battLabel").textContent = left === null ? "Full battery lasts" : s.est ? "Battery left (estimate)" : "Battery left";
+    $("fullMin").textContent = left === null ? mins(s.full) : "~" + mins(left);
     $("link").textContent = s.st === "OFF" ? "Not woken yet" : s.uart ? "OK" : "No reply";
     const sw = $("arecSwitch");
     if (document.activeElement !== sw) sw.checked = !!s.arec;
@@ -435,6 +466,8 @@ const FRIENDLY = [
   [/^autorec = ON/,                        "Power-up recording will be stopped automatically."],
   [/^autorec = OFF/,                       "Power-up recording setting turned off."],
   [/^RunCam-Ctl connected/,                ""],
+  [/^LOW BATTERY/,                         "Battery low: stop and save soon.", true],
+  [/^check the camera light first/,        "Answer the light question first.", true],
   [/^note: camera does not report/,        ""],
 ];
 function friendly(line) {
@@ -472,6 +505,8 @@ document.addEventListener("visibilitychange", () => {
 $("connectBtn").onclick = connect;
 $("disconnectBtn").onclick = disconnect;
 $("actionBtn").onclick = () => { const c = actionFor(st); if (c) { showSaved = false; command(c); } };
+$("askRec").onclick = () => command("SYNC REC");
+$("askIdle").onclick = () => command("SYNC IDLE");
 $("syncRec").onclick = () => { command("SYNC REC"); $("mismatch").open = false; };
 $("syncIdle").onclick = () => { command("SYNC IDLE"); $("mismatch").open = false; };
 $("arecSwitch").onchange = (e) => command(e.target.checked ? "AUTOREC ON" : "AUTOREC OFF");
